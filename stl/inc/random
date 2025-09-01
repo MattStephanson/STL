@@ -11,6 +11,7 @@
 #include <__msvc_int128.hpp>
 #include <__msvc_random_ziggurat_tables.hpp>
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <ios>
@@ -1030,6 +1031,253 @@ private:
     static constexpr int _One_mod_n = 1 % _Nx; // either 0 or 1
     static constexpr int _M_mod_n   = _Mx % _Nx;
 };
+
+#ifdef _HAS_CXX26
+_EXPORT_STD template <class _Uint, size_t _Word_size, size_t _Word_count, size_t _Round_count, _Uint... _Consts>
+class philox_engine {
+private:
+    _RNG_REQUIRE_UINTTYPE(philox_engine, _Uint);
+
+    static_assert(sizeof...(_Consts) == _Word_count,
+        "invalid template argument for philox_engine: N5032 [rand.eng.philox]/6.1 "
+        "requires the number of constants to equal word_count");
+    static_assert(_Word_count == 2 || _Word_count == 4,
+        "invalid template argument for philox_engine: N5032 [rand.eng.philox]/6.2 requires word_count to be 2 or 4");
+    static_assert(0 < _Round_count,
+        "invalid template argument for philox_engine: N5032 [rand.eng.philox]/6.3 requires round_count to be positive");
+    static_assert(0 < _Word_size && _Word_size <= numeric_limits<_Uint>::digits,
+        "invalid template argument for philox_engine: N5032 [rand.eng.philox]/6.4 requires word_size to be positive "
+        "and no larger than the width of result_type");
+
+    static constexpr size_t _Array_size = _Word_count / 2;
+    static constexpr auto _Mask         = static_cast<_Uint>(-1) >> (sizeof(_Uint) * CHAR_BIT - _Word_size);
+
+    static consteval array<_Uint, _Array_size> _Get_parameters(const bool _Even) {
+        constexpr _Uint _Consts_array[] = {_Consts...};
+        array<_Uint, _Array_size> _Result;
+        for (size_t _Ix = 0; _Ix < _Array_size; ++_Ix) {
+            _Result[_Ix] = _Consts_array[2 * _Ix + static_cast<size_t>(_Even)] & _Mask;
+        }
+
+        return _Result;
+    }
+
+public:
+    using result_type = _Uint;
+
+    static constexpr size_t word_size                             = _Word_size;
+    static constexpr size_t word_count                            = _Word_count;
+    static constexpr size_t round_count                           = _Round_count;
+    static constexpr array<result_type, _Array_size> multipliers  = _Get_parameters(false);
+    static constexpr array<result_type, _Array_size> round_consts = _Get_parameters(true);
+    static constexpr result_type default_seed                     = static_cast<_Uint>(20111115u);
+
+    _NODISCARD static constexpr result_type(min)() noexcept /* strengthened */ {
+        return 0;
+    }
+    _NODISCARD static constexpr result_type(max)() noexcept /* strengthened */ {
+        return _Mask;
+    }
+
+    philox_engine() noexcept /* strengthened */ : philox_engine(default_seed) {}
+
+    explicit philox_engine(result_type _Xx0) noexcept /* strengthened */ {
+        seed(_Xx0);
+    }
+
+    template <class _Seed_seq, _Enable_if_seed_seq_t<_Seed_seq, philox_engine> = 0>
+    explicit philox_engine(_Seed_seq& _Seq) {
+        seed(_Seq);
+    }
+
+    void seed(result_type _Value = default_seed) noexcept /* strengthened */ {
+        _Key[0] = static_cast<_Uint>(_Value & _Mask);
+        for (size_t _Ix = 1; _Ix < _Array_size; ++_Ix) {
+            _Key[_Ix] = 0u;
+        }
+    }
+
+    template <class _Seed_seq, _Enable_if_seed_seq_t<_Seed_seq, philox_engine> = 0>
+    void seed(_Seed_seq& _Seq) noexcept /* strengthened */ {
+        constexpr size_t _Kx = _Word_count / 2;
+        constexpr int _Px    = (_Word_size + 31) / 32;
+        uint32_t _Arr[_Kx * _Px];
+        _Seq.generate(&_Arr[0], &_Arr[_Kx * _Px]);
+
+        size_t _Idx0 = 0;
+        for (size_t _Ix = 0; _Ix < _Kx; ++_Ix, _Idx0 += _Px) { // pack _Px words
+            _Key[_Ix] = _Arr[_Idx0];
+            for (int _Jx = 1; _Jx < _Px; ++_Jx) {
+                _Key[_Ix] |= static_cast<_Uint>(_Arr[_Idx0 + _Jx]) << (32 * _Jx);
+            }
+
+            _Key[_Ix] &= _Mask;
+        }
+    }
+
+    result_type operator()() noexcept /* strengthened */ {
+        ++_I_state;
+        if (_I_state == _Word_count) {
+            _Generate();
+            _I_state = 0;
+        }
+
+        return _Yx[_I_state];
+    }
+
+    void discard(unsigned long long _Nskip) noexcept /* strengthened */ {
+        // decompose into increments of Z and i
+        auto _Incr           = _Nskip / _Word_count;
+        const auto _Incr_mod = _Nskip % _Word_count;
+
+        _Incr += (_I_state + _Incr_mod) >= _Word_count; // carry in
+        _I_state = (_I_state + _Incr_mod) % _Word_count;
+
+        // The counter Z is incremented after generating the cache, meaning that the current cache was generated with
+        // Z-1. Thus, whenever the counter should end up with some value Z', we  need to generate the cache with the
+        // value Z'-1.
+
+        const bool _Recalculate_cache = _Incr > 0u && _I_state < _Word_count - 1u;
+        if (_Recalculate_cache) {
+            --_Incr;
+        }
+
+        for (size_t _Ix = 0; _Incr != 0 && _Ix < _Word_count; ++_Ix) {
+            const auto _Addend = static_cast<_Uint>(_Incr & _Mask);
+            const auto _Sum    = (_Xx[_Ix] + _Addend) & _Mask;
+            if constexpr (_Word_size < sizeof(decltype(_Incr)) * CHAR_BIT) {
+                _Incr >>= _Word_size;
+            } else {
+                _Incr = 0;
+            }
+
+            _Incr += _Sum < _Addend; // carry out
+            _Xx[_Ix] = _Sum;
+        }
+
+        if (_Recalculate_cache) {
+            _Generate();
+        }
+    }
+
+    void set_counter(const array<_Uint, _Word_count>& _Counter) noexcept /* strengthened */ {
+        auto _Src = _Counter.data() + _Word_count;
+        auto _Dst = _Xx.data();
+        for (size_t _Ix = 0; _Ix < _Word_count; ++_Ix) {
+            //_Xx[_Ix] = _Counter[_Word_count - 1 - _Ix] & _Mask;
+            *_Dst++ = *(--_Src) & _Mask;
+        }
+
+        _I_state = _Word_count - 1;
+    }
+
+    _NODISCARD friend bool operator==(
+        const philox_engine& _Left, const philox_engine& _Right) noexcept /* strengthened */
+    {
+        return _Left._Key == _Right._Key && _Left._Xx == _Right._Xx && _Left._I_state == _Right._I_state;
+    }
+
+    template <class _Elem, class _S_Traits>
+    friend basic_ostream<_Elem, _S_Traits>& operator<<(
+        basic_ostream<_Elem, _S_Traits>& _Ostr, const philox_engine& _Eng) {
+        for (size_t _Ix = 0; _Ix < _Eng._Key.size(); ++_Ix) {
+            _Ostr << _Eng._Key[_Ix] << ' ';
+        }
+
+        for (size_t _Ix = 0; _Ix < _Eng._Xx.size(); ++_Ix) {
+            _Ostr << _Eng._Xx[_Ix] << ' ';
+        }
+
+        _Ostr << _Eng._I_state;
+        return _Ostr;
+    }
+
+    template <class _Elem, class _S_Traits>
+    friend basic_istream<_Elem, _S_Traits>& operator>>(basic_istream<_Elem, _S_Traits>& _Istr, philox_engine& _Eng) {
+        for (size_t _Ix = 0; _Ix < _Eng._Key.size(); ++_Ix) {
+            _Istr >> _Eng._Key[_Ix];
+        }
+
+        for (size_t _Ix = 0; _Ix < _Eng._Xx.size(); ++_Ix) {
+            _Istr >> _Eng._Xx[_Ix];
+        }
+
+        _Istr >> _Eng._I_state;
+
+        if (_Eng._I_state != _Word_count - 1) {
+            // See `discard` for explanation of predecrement.
+            _Eng._Decrement_counter();
+            _Eng._Generate();
+        }
+
+        return _Istr;
+    }
+
+private:
+    size_t _I_state               = _Word_count - 1;
+    array<_Uint, _Word_count> _Xx = {};
+    array<_Uint, _Word_count> _Yx = {};
+    array<_Uint, _Array_size> _Key;
+
+    void _Generate() noexcept {
+        auto _Vx = _Xx;
+
+        for (size_t _Qx = 0; _Qx < _Round_count; ++_Qx) {
+            if constexpr (_Word_count == 4) {
+                _STD swap(_Vx[0], _Vx[2]);
+            }
+
+            for (size_t _Kx = 0; _Kx < _Array_size; ++_Kx) {
+                const auto _Round_key = static_cast<_Uint>(_Key[_Kx] + _Qx * round_consts[_Kx]) & _Mask;
+                _Uint _Mul_lo;
+                _Uint _Mul_hi;
+                if constexpr (_Word_size <= 32) {
+                    using _ProdType  = conditional_t<_Word_size <= 8, uint_fast16_t,
+                         conditional_t<_Word_size <= 16, uint_fast32_t, uint_fast64_t>>;
+                    const auto _Prod = _ProdType{_Vx[2 * _Kx]} * _ProdType{multipliers[_Kx]};
+                    _Mul_lo          = static_cast<_Uint>(_Prod & _Mask);
+                    _Mul_hi          = static_cast<_Uint>(_Prod >> _Word_size);
+                } else {
+                    _Mul_lo = _Base128::_UMul128(_Vx[2 * _Kx], multipliers[_Kx], _Mul_hi);
+                    if constexpr (_Word_size < 64) {
+                        constexpr auto _Diff = 64u - _Word_size;
+                        _Mul_hi              = (_Mul_hi << _Diff) | (_Mul_lo >> _Word_size);
+                        _Mul_lo &= _Mask;
+                    }
+                }
+
+                _Vx[2 * _Kx]     = static_cast<_Uint>(_Mul_hi ^ _Round_key ^ _Vx[2 * _Kx + 1]);
+                _Vx[2 * _Kx + 1] = _Mul_lo;
+            }
+        }
+
+        _Yx = _Vx;
+        _Increment_counter();
+    }
+
+    void _Increment_counter() noexcept {
+        for (auto& _Word : _Xx) {
+            if (_Word < _Mask) {
+                ++_Word;
+                break;
+            } else {
+                _Word = 0;
+            }
+        }
+    }
+
+    void _Decrement_counter() noexcept {
+        for (auto& _Word : _Xx) {
+            if (_Word > 0) {
+                --_Word;
+                break;
+            } else {
+                _Word = _Mask;
+            }
+        }
+    }
+};
+#endif // _HAS_CXX26
 
 _EXPORT_STD template <class _Engine, size_t _Px, size_t _Rx>
 class discard_block_engine {
@@ -4778,6 +5026,12 @@ _EXPORT_STD using ranlux48      = discard_block_engine<ranlux48_base, 389, 11>;
 _EXPORT_STD using knuth_b       = shuffle_order_engine<minstd_rand0, 256>;
 
 _EXPORT_STD using default_random_engine = mt19937;
+
+#ifdef _HAS_CXX26
+_EXPORT_STD using philox4x32 = philox_engine<uint_fast32_t, 32, 4, 10, 0xCD9E8D57, 0x9E3779B9, 0xD2511F53, 0xBB67AE85>;
+_EXPORT_STD using philox4x64 = philox_engine<uint_fast64_t, 64, 4, 10, 0xCA5A826395121157, 0x9E3779B97F4A7C15,
+    0xD2E7470EE14C6C93, 0xBB67AE8584CAA73B>;
+#endif // _HAS_CXX26
 
 extern "C++" _CRTIMP2_PURE unsigned int __CLRCALL_PURE_OR_CDECL _Random_device();
 
