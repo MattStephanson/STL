@@ -87,6 +87,7 @@
         "iterator",
         "latch",
         "limits",
+        "linalg.h",
         "list",
         "locale",
         "map",

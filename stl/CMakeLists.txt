@@ -93,6 +93,7 @@ set(HEADERS
     ${CMAKE_CURRENT_LIST_DIR}/inc/iterator
     ${CMAKE_CURRENT_LIST_DIR}/inc/latch
     ${CMAKE_CURRENT_LIST_DIR}/inc/limits
+    ${CMAKE_CURRENT_LIST_DIR}/inc/linalg.h
     ${CMAKE_CURRENT_LIST_DIR}/inc/list
     ${CMAKE_CURRENT_LIST_DIR}/inc/locale
     ${CMAKE_CURRENT_LIST_DIR}/inc/map
